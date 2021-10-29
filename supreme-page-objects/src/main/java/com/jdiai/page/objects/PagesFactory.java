@@ -1,12 +1,14 @@
 package com.jdiai.page.objects;
 
 import com.jdiai.tools.ILogger;
+import com.jdiai.tools.ReflectionUtils;
 import com.jdiai.tools.func.JFunc3;
 import com.jdiai.tools.map.MapArray;
 import com.jdiai.tools.pairs.Pair;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
@@ -40,7 +42,7 @@ public class PagesFactory {
     public MapArray<String, SetupRule> setupRules = new MapArray<String, SetupRule>(
         $("UI Object", sRule(
             info -> isUIObjectField.apply(info.field),
-            info -> initElements(info.instance))),
+            this::initElements)),
         $("Annotations", sRule(
             info -> any(annotations.values(), ar -> info.field.isAnnotationPresent(ar.annotation)),
             info -> {
@@ -52,8 +54,10 @@ public class PagesFactory {
             }))
     );
     public ILogger logger = new ConsoleLogger("PageFactory Logger");
+
     public JFunc3<Throwable, String, Object[], RuntimeException> reThrowException =
         (ex, msg, args) -> new RuntimeException(format(msg, args), ex);
+
     public Function<String, RuntimeException> exceptionFunc =
         RuntimeException::new;
 
@@ -69,38 +73,49 @@ public class PagesFactory {
         Field[] allFields = cl.getDeclaredFields();
         List<Field> pages = filter(allFields, filterPages);
         for (Field field : pages) {
-            createAndSetupField(null, field);
+            createAndSetupField(new InitInfo(null), field);
         }
         initialized.add(cl);
     }
 
     public <T> T initElements(Class<T> cl) {
         Object page = createPageFunc.apply(cl);
-        initElements(page);
+        initElements(new InitInfo(page));
         return (T) page;
     }
 
-    public void initElements(Object page) {
-        List<Field> pageFields = getFieldsDeep(page.getClass());
+    public void initElements(InitInfo pageInfo) {
+        List<Field> pageFields = getFieldsDeep(pageInfo.instance.getClass());
         List<Field> filteredFields = filter(pageFields, fieldsFilter);
         for (Field field : filteredFields) {
-            createAndSetupField(page, field);
+            createAndSetupField(pageInfo, field);
         }
     }
 
-    protected void createAndSetupField(Object page, Field field) {
-        Object instance = getValueField(field, page);
+    protected void createAndSetupField(InitInfo pageInfo, Field field) {
+        Object instance = getValueField(field, pageInfo.instance);
         if (instance == null) {
             instance = createInstance(field.getType());
         }
-        InitInfo info = new InitInfo(page, field, instance);
+        InitInfo info = new InitInfo(pageInfo.instance, field, instance, genericTypes(pageInfo, field));
         MapArray<String, SetupRule> rules = setupRules.filter(
             rule -> rule.condition.apply(info));
         for (Pair<String, SetupRule> rule : rules) {
             logger.debug("Setup rule '%s' for field %s", rule.key, field.getName());
             rule.value.action.accept(info);
         }
-        setFieldValue(field, page, info.instance);
+        setFieldValue(field, pageInfo.instance, info.instance);
+    }
+
+    private Type[] genericTypes(InitInfo pageInfo, Field field) {
+        try {
+            Type[] types = getGenericTypes(field);
+            return any(types, t -> !(t instanceof Class<?>))
+                ? pageInfo.genericTypes
+                : types;
+        } catch (Exception ignore) {
+            return new Type[]{};
+        }
     }
 
     protected void setFieldValue(Field field, Object page, Object instance) {
